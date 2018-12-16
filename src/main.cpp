@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
 #include <WiFiMan.h>
 #include <dht.h>
 #include <Wire.h>
@@ -29,11 +31,69 @@ Adafruit_TSL2561_Unified tsl = Adafruit_TSL2561_Unified(TSL2561_ADDR_FLOAT, 1234
 #define INTERVAL_SOUND 1000
 #define PIN_SOUND A0
 
+// MQTT parameters
+#define MQTT_MESSAGE_INTERVAL 30000
+#define MQTT_TOPIC_OUT "deviceNet/out"
+#define MQTT_TOPIC_IN "deviceNet/in"
+#define MQTT_TOPIC_REGISTRY "deviceNet/registry"
+#define MQTT_TOPIC_STATUS "deviceNet/status"
+#define DEVICE_NAME "EnvironmentSensor"
+
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
 // General variables
 unsigned long lastDhtTimestamp = 0UL;
 unsigned long lastSgpTimestamp = 0UL;
 unsigned long lastTslTimestamp = 0UL;
 unsigned long lastSoundTimestamp = 0UL;
+unsigned long lastMqttPublishTimestamp = 0UL;
+
+#define VALUE_ID_TEMPERATURE 0
+#define VALUE_ID_HUMIDITY 1
+#define VALUE_ID_LIGHT_LEVEL 2
+#define VALUE_ID_NOISE_LEVEL 3
+#define VALUE_ID_TVOC 4
+#define VALUE_ID_CO2 5
+
+/******************************************************************************
+ * 
+ */
+void reconnectToBroker() {
+  // Loop until we're reconnected
+  while (!mqttClient.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Create a random client ID
+    String clientId = "ESP8266Client-";
+    clientId += String(random(0xffff), HEX);
+    // Attempt to connect
+    if (mqttClient.connect(clientId.c_str())) {
+      Serial.println("connected");
+      // Once connected, publish an announcement...
+      //mqttClient.publish("outTopic", "hello world");
+      // ... and resubscribe
+      mqttClient.subscribe("inTopic");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(mqttClient.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
+/******************************************************************************
+ * 
+ */
+void publishValue(int applicationId, int messageType, String contentString) {
+  String topic = String(MQTT_TOPIC_OUT) + "/" + String(DEVICE_NAME) + "/" + applicationId + "/1/" + messageType;  // command type = 1/set
+  Serial.print("publish: ");
+  Serial.print(topic);
+  Serial.print(" | ");
+  Serial.println(contentString);
+  mqttClient.publish(topic.c_str(), contentString.c_str());
+}
 
 /******************************************************************************
  * 
@@ -97,34 +157,23 @@ void setup() {
     }
   }
 
-  sensor_t sensor;
-  tsl.getSensor(&sensor);
-  Serial.println("------------------------------------");
-  Serial.print("Sensor:       ");
-  Serial.println(sensor.name);
-  Serial.print("Driver Ver:   ");
-  Serial.println(sensor.version);
-  Serial.print("Unique ID:    ");
-  Serial.println(sensor.sensor_id);
-  Serial.print("Max Value:    ");
-  Serial.print(sensor.max_value);
-  Serial.println(" lux");
-  Serial.print("Min Value:    ");
-  Serial.print(sensor.min_value);
-  Serial.println(" lux");
-  Serial.print("Resolution:   ");
-  Serial.print(sensor.resolution);
-  Serial.println(" lux");
-  Serial.println("------------------------------------");
-  Serial.println("");
   tsl.enableAutoRange(true);
   tsl.setIntegrationTime(TSL2561_INTEGRATIONTIME_13MS);
+
+  String mqttBrokerAddress = "192.168.64.253";
+  mqttClient.setServer(mqttBrokerAddress.c_str(), 1883);
+  //mqttClient.setCallback(callback);
 }
 
 /******************************************************************************
  * 
  */
 void loop() {
+
+  if (!mqttClient.connected()) {
+    reconnectToBroker();
+  }
+  mqttClient.loop();
 
   // DHT22 temperature and humidity reading
   if (millis() - lastDhtTimestamp >= INTERVAL_DHT22 || millis() - lastDhtTimestamp < 0) {
@@ -193,5 +242,17 @@ void loop() {
     Serial.print("Noise: ");
     Serial.println(noiseLevel);
     lastSoundTimestamp = millis();
+  }
+
+  // MQTT handling
+  //myNode.publishValue(CHILD_ID_TEMPERATURE, V_TEMP, tempString);
+  if (millis() - lastMqttPublishTimestamp >= MQTT_MESSAGE_INTERVAL || millis() - lastMqttPublishTimestamp < 0) {
+
+    if (temperature < 85 && temperature > -30) {
+      String tempString(temperature, 1);
+      publishValue(VALUE_ID_TEMPERATURE, 0, tempString);
+    }
+
+    lastMqttPublishTimestamp = millis();
   }
 }
