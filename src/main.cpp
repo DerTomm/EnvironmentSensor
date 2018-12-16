@@ -7,12 +7,13 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_SGP30.h>
 #include <Adafruit_TSL2561_U.h>
+#include <CircularBuffer.h>
 
 // WifiMan parameters
 Config wifiConfig;
 
 // DHT22 parameters
-#define INTERVAL_DHT22 60000
+#define INTERVAL_DHT22 30000
 #define DHT22_PIN D3
 dht DHT;
 float humidity;
@@ -21,14 +22,15 @@ float temperature;
 // SGP30 parameters
 #define INTERVAL_SGP30 30000
 Adafruit_SGP30 sgp;
-int sgpCounter = 0;
+uint16_t co2;
+uint16_t tvoc;
 
 // TSL2561 parameters
-#define INTERVAL_TSL2561 1000
+#define INTERVAL_TSL2561 500
 Adafruit_TSL2561_Unified tsl = Adafruit_TSL2561_Unified(TSL2561_ADDR_FLOAT, 12345);
 
 // Sound sensor parameters
-#define INTERVAL_SOUND 1000
+#define INTERVAL_SOUND 500
 #define PIN_SOUND A0
 
 // MQTT parameters
@@ -48,6 +50,9 @@ unsigned long lastSgpTimestamp = 0UL;
 unsigned long lastTslTimestamp = 0UL;
 unsigned long lastSoundTimestamp = 0UL;
 unsigned long lastMqttPublishTimestamp = 0UL;
+
+CircularBuffer<int, 60> cbNoiseLevel;
+CircularBuffer<int, 60> cbLightLevel;
 
 #define VALUE_ID_TEMPERATURE 0
 #define VALUE_ID_HUMIDITY 1
@@ -88,10 +93,10 @@ void reconnectToBroker() {
  */
 void publishValue(int applicationId, int messageType, String contentString) {
   String topic = String(MQTT_TOPIC_OUT) + "/" + String(DEVICE_NAME) + "/" + applicationId + "/1/" + messageType;  // command type = 1/set
-  Serial.print("publish: ");
-  Serial.print(topic);
-  Serial.print(" | ");
-  Serial.println(contentString);
+  // Serial.print("publish: ");
+  // Serial.print(topic);
+  // Serial.print(" | ");
+  // Serial.println(contentString);
   mqttClient.publish(topic.c_str(), contentString.c_str());
 }
 
@@ -103,6 +108,28 @@ uint32_t getAbsoluteHumidity(float temperature, float humidity) {
   const float absoluteHumidity = 216.7f * ((humidity / 100.0f) * 6.112f * exp((17.62f * temperature) / (243.12f + temperature)) / (273.15f + temperature));  // [g/m^3]
   const uint32_t absoluteHumidityScaled = static_cast<uint32_t>(1000.0f * absoluteHumidity);                                                                 // [mg/m^3]
   return absoluteHumidityScaled;
+}
+
+/******************************************************************************
+ * 
+ */
+double getAverageNoiseLevel() {
+  double avg = 0.0;
+  for (unsigned int i = 0; i < cbNoiseLevel.size(); i++) {
+    avg += cbNoiseLevel[i];
+  }
+  return avg / cbNoiseLevel.size();
+}
+
+/******************************************************************************
+ * 
+ */
+double getAverageLightLevel() {
+  double avg = 0.0;
+  for (unsigned int i = 0; i < cbLightLevel.size(); i++) {
+    avg += cbLightLevel[i];
+  }
+  return avg / cbLightLevel.size();
 }
 
 /******************************************************************************
@@ -160,8 +187,9 @@ void setup() {
   tsl.enableAutoRange(true);
   tsl.setIntegrationTime(TSL2561_INTEGRATIONTIME_13MS);
 
-  String mqttBrokerAddress = "192.168.64.253";
-  mqttClient.setServer(mqttBrokerAddress.c_str(), 1883);
+  char* brokerAddr = new char[wifiMan.getMqttServerAddr().length() + 1];
+  wifiMan.getMqttServerAddr().toCharArray(brokerAddr, wifiMan.getMqttServerAddr().length() + 1);
+  mqttClient.setServer((const char*)brokerAddr, wifiMan.getMqttPort());
   //mqttClient.setCallback(callback);
 }
 
@@ -176,82 +204,70 @@ void loop() {
   mqttClient.loop();
 
   // DHT22 temperature and humidity reading
-  if (millis() - lastDhtTimestamp >= INTERVAL_DHT22 || millis() - lastDhtTimestamp < 0) {
+  if (lastDhtTimestamp == 0 || millis() - lastDhtTimestamp >= INTERVAL_DHT22 || millis() - lastDhtTimestamp < 0) {
     int chk = DHT.read22(DHT22_PIN);
     if (chk == DHTLIB_OK) {
       temperature = DHT.temperature;
       humidity = DHT.humidity;
-      Serial.print("DHT22: ");
-      Serial.print(temperature);
-      Serial.print(" | ");
-      Serial.println(humidity);
     } else {
-      Serial.println("DHT22 error.");
       temperature = humidity = -255.0;
     }
     lastDhtTimestamp = millis();
   }
 
   // SGP30 Gas Sensor
-  if (millis() - lastSgpTimestamp >= INTERVAL_SGP30 || millis() - lastSgpTimestamp < 0) {
+  if (lastSgpTimestamp == 0 || millis() - lastSgpTimestamp >= INTERVAL_SGP30 || millis() - lastSgpTimestamp < 0) {
     if (temperature > -255.0 && humidity > -255.0) {
       sgp.setHumidity(getAbsoluteHumidity(temperature, humidity));
     }
     if (sgp.IAQmeasure()) {
-      Serial.print("TVOC ");
-      Serial.print(sgp.TVOC);
-      Serial.print(" ppb\t");
-      Serial.print("eCO2 ");
-      Serial.print(sgp.eCO2);
-      Serial.println(" ppm");
-      sgpCounter++;
-      if (sgpCounter == 30) {
-        sgpCounter = 0;
-        uint16_t TVOC_base, eCO2_base;
-        if (!sgp.getIAQBaseline(&eCO2_base, &TVOC_base)) {
-          Serial.print("****Baseline values: eCO2: 0x");
-          Serial.print(eCO2_base, HEX);
-          Serial.print(" & TVOC: 0x");
-          Serial.println(TVOC_base, HEX);
-        }
-      }
+      tvoc = sgp.TVOC;
+      co2 = sgp.eCO2;
     }
     lastSgpTimestamp = millis();
   }
 
   // TSL2561 Light Sensor
-  if (millis() - lastTslTimestamp >= INTERVAL_TSL2561 || millis() - lastTslTimestamp < 0) {
+  if (lastTslTimestamp == 0 || millis() - lastTslTimestamp >= INTERVAL_TSL2561 || millis() - lastTslTimestamp < 0) {
     sensors_event_t event;
     tsl.getEvent(&event);
-
-    /* Display the results (light is measured in lux) */
     if (event.light) {
-      Serial.print(event.light);
-      Serial.println(" lux");
-    } else {
-      /* If event.light = 0 lux the sensor is probably saturated
-       and no reliable data could be generated! */
-      Serial.println("Sensor overload");
+      cbLightLevel.push(event.light);
     }
     lastTslTimestamp = millis();
   }
 
   // Sound Sensor V2 Noise Level
-  if (millis() - lastSoundTimestamp >= INTERVAL_SOUND || millis() - lastSoundTimestamp < 0) {
+  if (lastSoundTimestamp == 0 || millis() - lastSoundTimestamp >= INTERVAL_SOUND || millis() - lastSoundTimestamp < 0) {
     int noiseLevel = analogRead(PIN_SOUND);
-    Serial.print("Noise: ");
-    Serial.println(noiseLevel);
+    cbNoiseLevel.push(noiseLevel);
     lastSoundTimestamp = millis();
   }
 
   // MQTT handling
-  //myNode.publishValue(CHILD_ID_TEMPERATURE, V_TEMP, tempString);
   if (millis() - lastMqttPublishTimestamp >= MQTT_MESSAGE_INTERVAL || millis() - lastMqttPublishTimestamp < 0) {
 
     if (temperature < 85 && temperature > -30) {
       String tempString(temperature, 1);
       publishValue(VALUE_ID_TEMPERATURE, 0, tempString);
     }
+
+    if (humidity >= 0 && humidity <= 100.0) {
+      String humidityString(humidity, 1);
+      publishValue(VALUE_ID_HUMIDITY, 1, humidityString);
+    }
+
+    // String noiseString(getAverageNoiseLevel(), 1);
+    // publishValue(VALUE_ID_NOISE_LEVEL, 37, noiseString);
+
+    String lightString(getAverageLightLevel(), 1);
+    publishValue(VALUE_ID_LIGHT_LEVEL, 37, lightString);
+
+    String co2String(co2);
+    publishValue(VALUE_ID_CO2, 37, co2String);
+
+    String tvocString(tvoc);
+    publishValue(VALUE_ID_TVOC, 37, tvocString);
 
     lastMqttPublishTimestamp = millis();
   }
