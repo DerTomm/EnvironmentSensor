@@ -2,7 +2,9 @@
 #include <WiFiMan.h>
 #include <dht.h>
 #include <Wire.h>
-#include "Adafruit_SGP30.h"
+#include <Adafruit_Sensor.h>
+#include <Adafruit_SGP30.h>
+#include <Adafruit_TSL2561_U.h>
 
 // WifiMan parameters
 Config wifiConfig;
@@ -19,9 +21,19 @@ float temperature;
 Adafruit_SGP30 sgp;
 int sgpCounter = 0;
 
+// TSL2561 parameters
+#define INTERVAL_TSL2561 1000
+Adafruit_TSL2561_Unified tsl = Adafruit_TSL2561_Unified(TSL2561_ADDR_FLOAT, 12345);
+
+// Sound sensor parameters
+#define INTERVAL_SOUND 1000
+#define PIN_SOUND A0
+
 // General variables
 unsigned long lastDhtTimestamp = 0UL;
 unsigned long lastSgpTimestamp = 0UL;
+unsigned long lastTslTimestamp = 0UL;
+unsigned long lastSoundTimestamp = 0UL;
 
 /******************************************************************************
  * 
@@ -73,7 +85,40 @@ void setup() {
     Serial.println(wifiConfig.localIP);
   }
 
-  sgp.begin();
+  if (!sgp.begin()) {
+    Serial.println("Error: Could not initialize SGP30 sensor.");
+    while (1) {
+    }
+  }
+
+  if (!tsl.begin()) {
+    Serial.println("Error: Could not initialize TSL2561 sensor.");
+    while (1) {
+    }
+  }
+
+  sensor_t sensor;
+  tsl.getSensor(&sensor);
+  Serial.println("------------------------------------");
+  Serial.print("Sensor:       ");
+  Serial.println(sensor.name);
+  Serial.print("Driver Ver:   ");
+  Serial.println(sensor.version);
+  Serial.print("Unique ID:    ");
+  Serial.println(sensor.sensor_id);
+  Serial.print("Max Value:    ");
+  Serial.print(sensor.max_value);
+  Serial.println(" lux");
+  Serial.print("Min Value:    ");
+  Serial.print(sensor.min_value);
+  Serial.println(" lux");
+  Serial.print("Resolution:   ");
+  Serial.print(sensor.resolution);
+  Serial.println(" lux");
+  Serial.println("------------------------------------");
+  Serial.println("");
+  tsl.enableAutoRange(true);
+  tsl.setIntegrationTime(TSL2561_INTEGRATIONTIME_13MS);
 }
 
 /******************************************************************************
@@ -126,6 +171,27 @@ void loop() {
   }
 
   // TSL2561 Light Sensor
+  if (millis() - lastTslTimestamp >= INTERVAL_TSL2561 || millis() - lastTslTimestamp < 0) {
+    sensors_event_t event;
+    tsl.getEvent(&event);
+
+    /* Display the results (light is measured in lux) */
+    if (event.light) {
+      Serial.print(event.light);
+      Serial.println(" lux");
+    } else {
+      /* If event.light = 0 lux the sensor is probably saturated
+       and no reliable data could be generated! */
+      Serial.println("Sensor overload");
+    }
+    lastTslTimestamp = millis();
+  }
 
   // Sound Sensor V2 Noise Level
+  if (millis() - lastSoundTimestamp >= INTERVAL_SOUND || millis() - lastSoundTimestamp < 0) {
+    int noiseLevel = analogRead(PIN_SOUND);
+    Serial.print("Noise: ");
+    Serial.println(noiseLevel);
+    lastSoundTimestamp = millis();
+  }
 }
